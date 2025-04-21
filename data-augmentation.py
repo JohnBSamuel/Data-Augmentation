@@ -1,62 +1,98 @@
 import os
 import cv2
 import numpy as np
-from imgaug import augmenters as iaa
 from tqdm import tqdm
-import shutil
+from imgaug import augmenters as iaa
+from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
 
-# Paths
+# Directories
 image_dir = "/Users/johnsamuel/Desktop/CiviLens/CiviLens-backend/dataset/images"
 label_dir = "/Users/johnsamuel/Desktop/CiviLens/CiviLens-backend/dataset/labels"
 output_image_dir = "/Users/johnsamuel/Desktop/CiviLens/CiviLens-backend/dataset/images_aug"
 output_label_dir = "/Users/johnsamuel/Desktop/CiviLens/CiviLens-backend/dataset/labels_aug"
 
-# Create output directories if they don't exist
+# Create output directories
 os.makedirs(output_image_dir, exist_ok=True)
 os.makedirs(output_label_dir, exist_ok=True)
 
-# Define augmentations using imgaug
-augmenters = iaa.Sequential([
-    iaa.Fliplr(0.5),                       # horizontal flip
-    iaa.Affine(rotate=(-15, 15)),         # random rotation
-    iaa.GaussianBlur(sigma=(0, 1.0)),     # blur
-    iaa.AdditiveGaussianNoise(scale=(0, 0.05*255)),  # noise
-    iaa.Multiply((0.8, 1.2)),             # brightness
-    iaa.LinearContrast((0.75, 1.5)),      # contrast
-    iaa.Cutout(nb_iterations=2, size=0.2, squared=False)  # Cutout
+# Augmenter pipeline
+augmenter = iaa.Sequential([
+    iaa.Fliplr(0.5),
+    iaa.Affine(rotate=(-20, 20), scale=(0.8, 1.2)),
+    iaa.AdditiveGaussianNoise(scale=(0, 0.03*255)),
+    iaa.GaussianBlur(sigma=(0, 1.0)),
+    iaa.Multiply((0.8, 1.2)),
+    iaa.LinearContrast((0.75, 1.5)),
+    iaa.Cutout(nb_iterations=1, size=0.15, squared=False),
 ])
 
-# Loop through image files
-for filename in tqdm(os.listdir(image_dir)):
-    if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-        continue
+def yolo_to_bbox(yolo_line, img_w, img_h):
+    cls, x, y, w, h = map(float, yolo_line.strip().split())
+    x1 = (x - w/2) * img_w
+    y1 = (y - h/2) * img_h
+    x2 = (x + w/2) * img_w
+    y2 = (y + h/2) * img_h
+    return int(cls), BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
 
+def bbox_to_yolo(cls_id, bbox, img_w, img_h):
+    x_center = (bbox.x1 + bbox.x2) / 2 / img_w
+    y_center = (bbox.y1 + bbox.y2) / 2 / img_h
+    width = (bbox.x2 - bbox.x1) / img_w
+    height = (bbox.y2 - bbox.y1) / img_h
+    return f"{cls_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+
+# Main loop
+print("🔁 Augmenting dataset with bounding boxes...")
+
+image_files = [f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+for filename in tqdm(image_files):
+    name_wo_ext = os.path.splitext(filename)[0]
     image_path = os.path.join(image_dir, filename)
-    label_path = os.path.join(label_dir, filename.rsplit('.', 1)[0] + '.txt')
+    label_path = os.path.join(label_dir, f"{name_wo_ext}.txt")
 
-    # Skip if label file does not exist
     if not os.path.exists(label_path):
-        print(f"[!] Skipping {filename} (label not found)")
+        print(f"⚠️ Skipping {filename} — No label found.")
         continue
 
-    # Load image
     image = cv2.imread(image_path)
     if image is None:
-        print(f"[!] Skipping {filename} (failed to load image)")
+        print(f"⚠️ Could not read image {filename}")
         continue
-
-    # Convert BGR to RGB for augmentation (optional but consistent with most DL pipelines)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    height, width = image.shape[:2]
 
-    # Perform augmentation
-    for i in range(2):  # Number of augmented versions per image
-        augmented_image = augmenters(image=image)
-        aug_filename = filename.rsplit('.', 1)[0] + f"_aug{i}.jpg"
+    with open(label_path, 'r') as f:
+        label_lines = f.readlines()
+
+    # Parse YOLO labels to imgaug bboxes
+    bboxes = []
+    classes = []
+    for line in label_lines:
+        cls_id, bbox = yolo_to_bbox(line, width, height)
+        bboxes.append(bbox)
+        classes.append(cls_id)
+
+    bb_on_image = BoundingBoxesOnImage(bboxes, shape=image.shape)
+
+    for i in range(25):
+        aug_image, aug_bbs = augmenter(image=image, bounding_boxes=bb_on_image)
+        aug_bbs = aug_bbs.remove_out_of_image().clip_out_of_image()
+
+        aug_filename = f"{name_wo_ext}_aug{i}.jpg"
+        aug_labelname = f"{name_wo_ext}_aug{i}.txt"
+
         aug_image_path = os.path.join(output_image_dir, aug_filename)
-        aug_label_path = os.path.join(output_label_dir, aug_filename.rsplit('.', 1)[0] + '.txt')
+        aug_label_path = os.path.join(output_label_dir, aug_labelname)
 
-        # Save image (convert back to BGR for OpenCV write)
-        cv2.imwrite(aug_image_path, cv2.cvtColor(augmented_image, cv2.COLOR_RGB2BGR))
+        # Save augmented image
+        aug_image_bgr = cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(aug_image_path, aug_image_bgr)
 
-        # Copy label file as-is (assuming bounding boxes are YOLO format and unaffected)
-        shutil.copy(label_path, aug_label_path)
+        # Save augmented labels
+        with open(aug_label_path, 'w') as out_f:
+            for cls_id, bbox in zip(classes, aug_bbs.bounding_boxes):
+                yolo_line = bbox_to_yolo(cls_id, bbox, width, height)
+                out_f.write(yolo_line + '\n')
+
+print("✅ All images and labels augmented successfully.")
