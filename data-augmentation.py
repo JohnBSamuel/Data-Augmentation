@@ -15,15 +15,20 @@ output_label_dir = "/Users/johnsamuel/Desktop/CiviLens/CiviLens-backend/dataset/
 os.makedirs(output_image_dir, exist_ok=True)
 os.makedirs(output_label_dir, exist_ok=True)
 
-# Augmenter pipeline
+# Aggressive augmenter pipeline
 augmenter = iaa.Sequential([
-    iaa.Fliplr(0.5),
-    iaa.Affine(rotate=(-20, 20), scale=(0.8, 1.2)),
-    iaa.AdditiveGaussianNoise(scale=(0, 0.03*255)),
-    iaa.GaussianBlur(sigma=(0, 1.0)),
-    iaa.Multiply((0.8, 1.2)),
-    iaa.LinearContrast((0.75, 1.5)),
-    iaa.Cutout(nb_iterations=1, size=0.15, squared=False),
+    iaa.Fliplr(0.5),  # Horizontal flip
+    iaa.Affine(rotate=(-45, 45), scale=(0.5, 1.5), shear=(-16, 16)),  # Extreme rotation and scaling
+    iaa.PiecewiseAffine(scale=(0.01, 0.05)),  # Random perspective transformation
+    iaa.Crop(percent=(0, 0.2)),  # Random crops (to simulate occlusion)
+    iaa.ZoomIn(outlier_factor=(0.05, 0.2)),  # Zoom in
+    iaa.AdditiveGaussianNoise(scale=(0, 0.1*255)),  # Add noise
+    iaa.Multiply((0.5, 1.5)),  # Random brightness adjustment
+    iaa.LinearContrast((0.5, 2.0)),  # Increase contrast
+    iaa.MultiplyHue((0.5, 1.5)),  # Modify hue for color variation
+    iaa.GaussianBlur(sigma=(0, 2.0)),  # Apply heavy Gaussian blur
+    iaa.Cutout(nb_iterations=1, size=0.2, squared=False),  # Cutout (occlusion)
+    iaa.Sometimes(0.5, iaa.Dropout(p=(0.1, 0.2))),  # Random dropout (simulates damaged images)
 ])
 
 def yolo_to_bbox(yolo_line, img_w, img_h):
